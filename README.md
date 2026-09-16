@@ -90,6 +90,20 @@ dispatches the report workflow with `start_date`/`end_date` blank (so the
 previous full month is used). `last_triggered_date` prevents double-firing
 within the same period.
 
+### When a monthly run fires (the "2nd of the month")
+
+The **hourly scheduler** — `scheduler.yml` → `check_schedule.py` — decides
+*when* a monthly run happens, not the Run-workflow form. With
+`frequency: monthly`, it fires on the **2nd of each month** at the configured
+`hour` (UTC). That covers the previous full calendar month, so a run on
+**Sep 2** produces `August_Vacant_Home_Utility_Requests.xlsx`.
+
+The fire-day is set by `MONTHLY_RUN_DAY = 2` at the top of `check_schedule.py`
+and is intentionally **not** a form field — the options form only controls
+`frequency`, `hour`, and (for weekly) `day_of_week`. To run monthly on a
+different day, change `MONTHLY_RUN_DAY` in `check_schedule.py` (keep it `28` or
+lower so every month has that day).
+
 ## Running locally
 
 ```bash
