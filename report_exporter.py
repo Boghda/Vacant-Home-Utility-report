@@ -78,9 +78,8 @@ def load_credentials():
     """Prefer environment variables (GitHub Secrets + workflow inputs).
     Fall back to credentials.ini in the script folder for local testing."""
     cfg = {
-        "zendesk_subdomain":  os.environ.get("ZENDESK_SUBDOMAIN"),
-        "zendesk_email":      os.environ.get("ZENDESK_EMAIL"),
-        "zendesk_api_token":  os.environ.get("ZENDESK_API_TOKEN"),
+        "zendesk_subdomain":   os.environ.get("ZENDESK_SUBDOMAIN"),
+        "zendesk_oauth_token": os.environ.get("ZENDESK_OAUTH_TOKEN"),
         "gmail_email":        os.environ.get("GMAIL_EMAIL"),
         "gmail_app_password": os.environ.get("GMAIL_APP_PASSWORD"),
         # RECIPIENT_OVERRIDE (from workflow_dispatch input) takes priority over secret
@@ -92,15 +91,14 @@ def load_credentials():
     if ini_path.exists():
         parser = configparser.ConfigParser()
         parser.read(ini_path)
-        cfg["zendesk_subdomain"]  = cfg["zendesk_subdomain"]  or parser.get("zendesk", "subdomain",    fallback=None)
-        cfg["zendesk_email"]      = cfg["zendesk_email"]      or parser.get("zendesk", "email",        fallback=None)
-        cfg["zendesk_api_token"]  = cfg["zendesk_api_token"]  or parser.get("zendesk", "api_token",    fallback=None)
+        cfg["zendesk_subdomain"]   = cfg["zendesk_subdomain"]   or parser.get("zendesk", "subdomain",   fallback=None)
+        cfg["zendesk_oauth_token"] = cfg["zendesk_oauth_token"] or parser.get("zendesk", "oauth_token", fallback=None)
         cfg["gmail_email"]        = cfg["gmail_email"]        or parser.get("gmail",   "email",        fallback=None)
         cfg["gmail_app_password"] = cfg["gmail_app_password"] or parser.get("gmail",   "app_password", fallback=None)
         cfg["recipient_email"]    = cfg["recipient_email"]    or parser.get("email",   "recipient",    fallback=None)
 
     # For a dry run we only need Zendesk access; email creds may be absent.
-    required = ["zendesk_subdomain", "zendesk_email", "zendesk_api_token"]
+    required = ["zendesk_subdomain", "zendesk_oauth_token"]
     if not DRY_RUN:
         required += ["gmail_email", "gmail_app_password", "recipient_email"]
 
@@ -156,8 +154,11 @@ def format_date(created_at):
 # ============================================================================
 def make_session(creds):
     session = requests.Session()
-    session.auth = (f"{creds['zendesk_email']}/token", creds["zendesk_api_token"])
-    session.headers.update({"Content-Type": "application/json"})
+    # Zendesk OAuth: authenticate with a Bearer access token.
+    session.headers.update({
+        "Authorization": f"Bearer {creds['zendesk_oauth_token']}",
+        "Content-Type":  "application/json",
+    })
     return session
 
 

@@ -37,8 +37,7 @@ Add these **repository Secrets** (Settings → Secrets and variables → Actions
 | Secret | Description |
 |--------|-------------|
 | `ZENDESK_SUBDOMAIN` | Your Zendesk subdomain (the part before `.zendesk.com`). |
-| `ZENDESK_EMAIL` | Zendesk agent email used with the API token. |
-| `ZENDESK_API_TOKEN` | Zendesk API token. |
+| `ZENDESK_OAUTH_TOKEN` | Zendesk OAuth access token (sent as a `Bearer` token). |
 | `GMAIL_EMAIL` | Gmail address that sends the report. |
 | `GMAIL_APP_PASSWORD` | Gmail **app password** (not your normal password). |
 | `RECIPIENT_EMAIL` | Default recipient of the report. |
