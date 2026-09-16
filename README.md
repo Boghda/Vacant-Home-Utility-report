@@ -18,6 +18,11 @@ An `.xlsx` with one row per ticket and these columns:
 The date window is half-open (`created >= start` and `created < end`). On
 scheduled runs it defaults to the **previous full calendar month**.
 
+The file is named after the month it covers and rolls over automatically —
+e.g. a run on **Sep 2, 2026** covers **Aug 1 – Sep 1** and produces
+`August_Vacant_Home_Utility_Requests.xlsx`. By default the report runs on the
+**2nd of each month** at the configured hour (UTC).
+
 ## Repository layout
 
 | File | Purpose |

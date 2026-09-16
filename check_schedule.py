@@ -23,6 +23,11 @@ from datetime import datetime, timezone
 SCHEDULE_FILE = "schedule.json"
 WORKFLOW_FILE = "vacant_home_utility_report.yml"
 
+# Day of the month that the monthly report fires on (UTC). Running on the 2nd
+# (rather than the 1st) gives the previous month a full day to settle before
+# the report covers it.
+MONTHLY_RUN_DAY = 2
+
 
 def save_schedule(schedule: dict) -> None:
     with open(SCHEDULE_FILE, "w") as f:
@@ -106,8 +111,8 @@ def main():
             return
 
     elif frequency == "monthly":
-        if now.day != 1:
-            print(f"Not the 1st of the month (day={now.day}) — skipping.")
+        if now.day != MONTHLY_RUN_DAY:
+            print(f"Not day {MONTHLY_RUN_DAY} of the month (day={now.day}) — skipping.")
             return
 
     token = os.environ.get("GH_TOKEN", "")

@@ -187,6 +187,20 @@ def resolve_date_range():
     return first_of_prev_month.isoformat(), first_of_this_month.isoformat()
 
 
+def period_labels(start_date):
+    """Return (month_label, 'Month YYYY') for the covered month.
+
+    The covered month is the month of the (inclusive) start date, so a
+    default Aug 1 -> Sep 1 window yields ('August', 'August 2026'). This is
+    what names the output file and rolls over automatically each month.
+    """
+    try:
+        d = datetime.strptime(start_date, "%Y-%m-%d")
+        return d.strftime("%B"), d.strftime("%B %Y")
+    except ValueError:
+        return start_date, start_date
+
+
 def format_date(created_at):
     """Format a Zendesk ISO timestamp as MM/DD/YYYY."""
     if not created_at:
@@ -335,13 +349,13 @@ def build_excel(rows):
 # ============================================================================
 # EMAIL
 # ============================================================================
-def send_email(creds, attachment_buf, filename, row_count, start_date, end_date):
+def send_email(creds, attachment_buf, filename, row_count, start_date, end_date, period_label):
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
 
     msg            = MIMEMultipart()
     msg["From"]    = creds["gmail_email"]
     msg["To"]      = creds["recipient_email"]
-    msg["Subject"] = f"Vacant Home Utility Report - {start_date} to {end_date}"
+    msg["Subject"] = f"Vacant Home Utility Report - {period_label}"
 
     if TEST_ONE:
         msg["Subject"] += " [TEST ONE]"
@@ -397,7 +411,8 @@ def main():
 
     print("[2/3] Building Excel report...")
     excel_buf, row_count = build_excel(rows)
-    filename = f"vacant_home_utility_requests_{start_date}_{end_date}.xlsx"
+    month_label, period_label = period_labels(start_date)
+    filename = f"{month_label}_Vacant_Home_Utility_Requests.xlsx"
     print(f"  Rows: {row_count}")
     print(f"  File: {filename}")
 
@@ -408,7 +423,7 @@ def main():
         return
 
     print("[3/3] Sending email...")
-    send_email(creds, excel_buf, filename, row_count, start_date, end_date)
+    send_email(creds, excel_buf, filename, row_count, start_date, end_date, period_label)
 
     print("\nDone. Report delivered.")
 
