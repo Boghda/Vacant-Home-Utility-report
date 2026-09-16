@@ -78,8 +78,13 @@ def load_credentials():
     """Prefer environment variables (GitHub Secrets + workflow inputs).
     Fall back to credentials.ini in the script folder for local testing."""
     cfg = {
-        "zendesk_subdomain":   os.environ.get("ZENDESK_SUBDOMAIN"),
-        "zendesk_oauth_token": os.environ.get("ZENDESK_OAUTH_TOKEN"),
+        "zendesk_subdomain":     os.environ.get("ZENDESK_SUBDOMAIN"),
+        # OAuth client (client_credentials grant) — the headless default.
+        "zendesk_client_id":     os.environ.get("ZENDESK_CLIENT_ID"),
+        "zendesk_client_secret": os.environ.get("ZENDESK_CLIENT_SECRET"),
+        # Optional: a pre-minted access token. If set, it's used as-is and the
+        # client_credentials exchange is skipped.
+        "zendesk_oauth_token":   os.environ.get("ZENDESK_OAUTH_TOKEN"),
         "gmail_email":        os.environ.get("GMAIL_EMAIL"),
         "gmail_app_password": os.environ.get("GMAIL_APP_PASSWORD"),
         # RECIPIENT_OVERRIDE (from workflow_dispatch input) takes priority over secret
@@ -91,24 +96,69 @@ def load_credentials():
     if ini_path.exists():
         parser = configparser.ConfigParser()
         parser.read(ini_path)
-        cfg["zendesk_subdomain"]   = cfg["zendesk_subdomain"]   or parser.get("zendesk", "subdomain",   fallback=None)
-        cfg["zendesk_oauth_token"] = cfg["zendesk_oauth_token"] or parser.get("zendesk", "oauth_token", fallback=None)
+        cfg["zendesk_subdomain"]     = cfg["zendesk_subdomain"]     or parser.get("zendesk", "subdomain",     fallback=None)
+        cfg["zendesk_client_id"]     = cfg["zendesk_client_id"]     or parser.get("zendesk", "client_id",     fallback=None)
+        cfg["zendesk_client_secret"] = cfg["zendesk_client_secret"] or parser.get("zendesk", "client_secret", fallback=None)
+        cfg["zendesk_oauth_token"]   = cfg["zendesk_oauth_token"]   or parser.get("zendesk", "oauth_token",   fallback=None)
         cfg["gmail_email"]        = cfg["gmail_email"]        or parser.get("gmail",   "email",        fallback=None)
         cfg["gmail_app_password"] = cfg["gmail_app_password"] or parser.get("gmail",   "app_password", fallback=None)
         cfg["recipient_email"]    = cfg["recipient_email"]    or parser.get("email",   "recipient",    fallback=None)
 
-    # For a dry run we only need Zendesk access; email creds may be absent.
-    required = ["zendesk_subdomain", "zendesk_oauth_token"]
-    if not DRY_RUN:
-        required += ["gmail_email", "gmail_app_password", "recipient_email"]
-
-    missing = [k for k in required if not cfg.get(k)]
-    if missing:
+    # Zendesk access needs the subdomain plus EITHER a pre-minted access token
+    # OR an OAuth client id/secret to exchange for one.
+    if not cfg.get("zendesk_subdomain"):
+        raise SystemExit(f"Missing ZENDESK_SUBDOMAIN (env var or {ini_path}).")
+    if not cfg.get("zendesk_oauth_token") and not (
+        cfg.get("zendesk_client_id") and cfg.get("zendesk_client_secret")
+    ):
         raise SystemExit(
-            f"Missing credentials: {missing}. "
-            f"Set them as env vars (GitHub Secrets) or populate {ini_path}."
+            "Missing Zendesk auth: set ZENDESK_CLIENT_ID + ZENDESK_CLIENT_SECRET "
+            f"(or a ZENDESK_OAUTH_TOKEN) as env vars or in {ini_path}."
         )
+
+    # For a dry run we only need Zendesk access; email creds may be absent.
+    if not DRY_RUN:
+        missing = [k for k in ("gmail_email", "gmail_app_password", "recipient_email")
+                   if not cfg.get(k)]
+        if missing:
+            raise SystemExit(
+                f"Missing email credentials: {missing}. "
+                f"Set them as env vars (GitHub Secrets) or populate {ini_path}."
+            )
     return cfg
+
+
+def get_access_token(creds):
+    """Return a Zendesk OAuth access token.
+
+    Uses a pre-minted ZENDESK_OAUTH_TOKEN if provided; otherwise performs the
+    headless client_credentials grant against /oauth/tokens using the OAuth
+    client id/secret. The client's configured scopes must include read access.
+    """
+    if creds.get("zendesk_oauth_token"):
+        return creds["zendesk_oauth_token"]
+
+    base = f"https://{creds['zendesk_subdomain']}.zendesk.com"
+    print("  Requesting access token via client_credentials grant...")
+    resp = requests.post(
+        f"{base}/oauth/tokens",
+        json={
+            "grant_type":    "client_credentials",
+            "client_id":     creds["zendesk_client_id"],
+            "client_secret": creds["zendesk_client_secret"],
+        },
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    if resp.status_code >= 400:
+        print("  ERROR BODY:", resp.text)
+    resp.raise_for_status()
+
+    data = resp.json()
+    token = data.get("access_token")
+    if not token:
+        raise SystemExit(f"No access_token in OAuth response: {data}")
+    return token
 
 
 # ============================================================================
@@ -153,10 +203,11 @@ def format_date(created_at):
 # ZENDESK API
 # ============================================================================
 def make_session(creds):
+    token = get_access_token(creds)
     session = requests.Session()
     # Zendesk OAuth: authenticate with a Bearer access token.
     session.headers.update({
-        "Authorization": f"Bearer {creds['zendesk_oauth_token']}",
+        "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
     })
     return session

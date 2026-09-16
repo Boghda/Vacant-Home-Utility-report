@@ -155,8 +155,9 @@ jobs:
 
       - name: Run report exporter
         env:
-          ZENDESK_SUBDOMAIN:   ${{ secrets.ZENDESK_SUBDOMAIN }}
-          ZENDESK_OAUTH_TOKEN: ${{ secrets.ZENDESK_OAUTH_TOKEN }}
+          ZENDESK_SUBDOMAIN:     ${{ secrets.ZENDESK_SUBDOMAIN }}
+          ZENDESK_CLIENT_ID:     ${{ secrets.ZENDESK_CLIENT_ID }}
+          ZENDESK_CLIENT_SECRET: ${{ secrets.ZENDESK_CLIENT_SECRET }}
           GMAIL_EMAIL:        ${{ secrets.GMAIL_EMAIL }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL:    ${{ secrets.RECIPIENT_EMAIL }}
