@@ -53,6 +53,12 @@ REQUEST_TIMEOUT = 60
 DRY_RUN  = os.environ.get("DRY_RUN",  "false").lower() == "true"
 TEST_ONE = os.environ.get("TEST_ONE", "false").lower() == "true"
 
+# OAuth scope requested for the client_credentials access token. "read" is
+# Zendesk's global read scope and covers Search, Tickets, and Side
+# Conversations. Must be within the OAuth client's allowed scopes (if any are
+# configured on the client). Space-separated for multiple scopes.
+ZENDESK_SCOPE = os.environ.get("ZENDESK_SCOPE", "read")
+
 # Date range: overridable from Pocket Automation / workflow inputs.
 # When either is blank, the previous full calendar month is used.
 START_DATE_ENV = (os.environ.get("START_DATE") or "").strip()
@@ -146,6 +152,7 @@ def get_access_token(creds):
             "grant_type":    "client_credentials",
             "client_id":     creds["zendesk_client_id"],
             "client_secret": creds["zendesk_client_secret"],
+            "scope":         ZENDESK_SCOPE,
         },
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         timeout=REQUEST_TIMEOUT,

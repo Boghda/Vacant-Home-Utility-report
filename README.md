@@ -43,9 +43,13 @@ POSTs the OAuth client id/secret to `https://<subdomain>.zendesk.com/oauth/token
 gets back a short-lived access token, and uses it as a `Bearer` token for the
 rest of the run. Nothing is stored between runs.
 
+The token is requested with the **`read`** scope (Zendesk's global read scope,
+which covers Search, Tickets, and Side Conversations). Override it with the
+optional `ZENDESK_SCOPE` env var / secret (space-separated for multiple).
+
 Set up the OAuth client once in Zendesk Admin → **Apps and integrations → APIs
-→ OAuth Clients**, and make sure its configured **scopes include read access**
-(the token inherits the client's scopes).
+→ OAuth Clients**. If the client has **allowed scopes** configured, make sure
+`read` is included — a requested scope outside the allowed set is rejected.
 
 > Optional: if you'd rather supply a pre-minted access token, set
 > `ZENDESK_OAUTH_TOKEN` instead and the client_credentials exchange is skipped.
