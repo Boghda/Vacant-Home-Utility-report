@@ -370,14 +370,12 @@ def send_email(creds, attachment_buf, filename, row_count, start_date, end_date,
     body = (
         f"Hi,\n\n"
         f"Attached is the Vacant Home Utility Request report for tickets "
-        f"created from {start_date} (inclusive) to {end_date} (exclusive).\n\n"
+        f"created from {start_date} to {end_date}.\n\n"
         f"Ticket count:   {row_count}\n"
         f"Date range:     {start_date} -> {end_date}\n"
         f"Generated:      {today} (UTC)\n"
         f"Sent to:        {creds['recipient_email']}\n\n"
-        f"This report is generated automatically on its configured schedule.\n"
-        f"To run manually or with overrides, use the GitHub Actions "
-        f"\"Vacant Home Utility Report\" workflow -> Run workflow.\n"
+       
     )
     msg.attach(MIMEText(body, "plain"))
 
