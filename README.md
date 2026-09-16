@@ -30,6 +30,29 @@ scheduled runs it defaults to the **previous full calendar month**.
 | `credentials.ini.example` | Template for local credentials (copy to `credentials.ini`). |
 | `requirements.txt` | Python dependencies. |
 
+## Getting the Zendesk OAuth token
+
+The report authenticates with a Zendesk OAuth **access token** (a `Bearer`
+token). If you have an OAuth **client** (client ID + secret) rather than a
+token, mint the token once — Zendesk has no headless client-credentials grant
+and issues no refresh tokens, but its access tokens are long-lived, so a
+one-time exchange is all you need.
+
+1. In Zendesk Admin → **Apps and integrations → APIs → OAuth Clients**, make
+   sure your client's **Redirect URLs** include `http://localhost:8080/callback`.
+2. Put the client id/secret in `credentials.ini` (`[zendesk_oauth]` section, see
+   `credentials.ini.example`) or export `ZENDESK_SUBDOMAIN`,
+   `ZENDESK_CLIENT_ID`, `ZENDESK_CLIENT_SECRET`.
+3. Run:
+   ```bash
+   python get_zendesk_token.py
+   ```
+   It opens your browser to authorize (scope: `read`), captures the redirect,
+   and prints an access token.
+4. Store that access token as the `ZENDESK_OAUTH_TOKEN` secret below (the
+   client id/secret are **not** needed at runtime and should not be stored as
+   Actions secrets).
+
 ## Setup (GitHub Actions)
 
 Add these **repository Secrets** (Settings → Secrets and variables → Actions):
@@ -37,7 +60,7 @@ Add these **repository Secrets** (Settings → Secrets and variables → Actions
 | Secret | Description |
 |--------|-------------|
 | `ZENDESK_SUBDOMAIN` | Your Zendesk subdomain (the part before `.zendesk.com`). |
-| `ZENDESK_OAUTH_TOKEN` | Zendesk OAuth access token (sent as a `Bearer` token). |
+| `ZENDESK_OAUTH_TOKEN` | Zendesk OAuth access token (sent as a `Bearer` token). See above. |
 | `GMAIL_EMAIL` | Gmail address that sends the report. |
 | `GMAIL_APP_PASSWORD` | Gmail **app password** (not your normal password). |
 | `RECIPIENT_EMAIL` | Default recipient of the report. |
