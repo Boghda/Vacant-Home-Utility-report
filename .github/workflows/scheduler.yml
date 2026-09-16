@@ -1,0 +1,59 @@
+name: Report Scheduler
+
+on:
+  schedule:
+    - cron: "0 * * * *"  # every hour on the hour
+
+permissions:
+  contents: write
+  actions: write
+
+# Serialize scheduler runs so two of them can never race on schedule.json.
+concurrency:
+  group: report-schedule
+  cancel-in-progress: false
+
+jobs:
+  check-and-trigger:
+    name: Check Schedule & Trigger If Due
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check schedule and trigger report if due
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 check_schedule.py
+
+      - name: Commit updated schedule.json (if changed)
+        run: |
+          if [ ! -f schedule.json ]; then
+            echo "No schedule.json yet — nothing to commit."
+            exit 0
+          fi
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+          git add schedule.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "mark schedule as triggered"
+
+          # This commit carries last_triggered_date, the dedup marker that
+          # stops the report re-firing every hour for the rest of the period.
+          # A bare push here can lose the race against a concurrent commit and
+          # be silently rejected, dropping the marker. Rebase onto the latest
+          # main and retry so the marker always lands.
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:main; then
+              echo "Pushed on attempt $attempt."
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt) — rebasing and retrying..."
+            git pull --rebase origin main || true
+            sleep $((attempt * 2))
+          done
+          echo "ERROR: could not push schedule.json after 5 attempts." >&2
+          exit 1

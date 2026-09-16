@@ -1,0 +1,369 @@
+"""
+Vacant Home Utility Report Exporter
+-----------------------------------
+Rebuilds the "Vacant Home Utility Request" report from Zendesk:
+
+  Form    : Vacant Home Utility Request
+  Range   : a date window on ticket `created` (default: the previous full
+            calendar month; overridable via START_DATE / END_DATE)
+  Rows    : Ticket ID, Date, Property ID, Side Conversation, Status, Subject
+
+For each matching ticket the script reads the Property ID custom field and
+checks whether the ticket has any side conversations, then writes a styled
+Excel workbook and emails it via Gmail SMTP.
+
+Designed to run on GitHub Actions on a self-managed schedule (see
+check_schedule.py / the workflows). All flags and credentials are read from
+environment variables (GitHub Secrets + workflow_dispatch inputs) with a
+fallback to credentials.ini for local runs.
+"""
+
+import os
+import io
+import sys
+import time
+import smtplib
+import configparser
+from pathlib import Path
+from datetime import datetime, timezone, date
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+
+import requests
+import pandas as pd
+
+# ============================================================================
+# CONFIG
+# ============================================================================
+CREDENTIALS_FILE = "credentials.ini"
+
+# The Zendesk ticket form and the custom field that carries the Property ID.
+# Adjust these if the form is renamed or the field id changes.
+FORM_NAME = "Vacant Home Utility Request"
+PROPERTY_ID_FIELD_ID = 5969744168091
+
+# Throttle between per-ticket API calls to stay well under rate limits.
+SLEEP_SECONDS = 0.25
+
+REQUEST_TIMEOUT = 60
+
+# Flags: read from env (set by workflow_dispatch inputs) or fall back to defaults
+DRY_RUN  = os.environ.get("DRY_RUN",  "false").lower() == "true"
+TEST_ONE = os.environ.get("TEST_ONE", "false").lower() == "true"
+
+# Date range: overridable from Pocket Automation / workflow inputs.
+# When either is blank, the previous full calendar month is used.
+START_DATE_ENV = (os.environ.get("START_DATE") or "").strip()
+END_DATE_ENV   = (os.environ.get("END_DATE") or "").strip()
+
+# Columns in the output spreadsheet (order preserved).
+REPORT_COLUMNS = [
+    "Ticket ID",
+    "Date",
+    "Property ID",
+    "Side Conversation",
+    "Status",
+    "Subject",
+]
+
+SCRIPT_DIR = Path(__file__).parent
+
+
+# ============================================================================
+# CREDENTIALS
+# ============================================================================
+def load_credentials():
+    """Prefer environment variables (GitHub Secrets + workflow inputs).
+    Fall back to credentials.ini in the script folder for local testing."""
+    cfg = {
+        "zendesk_subdomain":  os.environ.get("ZENDESK_SUBDOMAIN"),
+        "zendesk_email":      os.environ.get("ZENDESK_EMAIL"),
+        "zendesk_api_token":  os.environ.get("ZENDESK_API_TOKEN"),
+        "gmail_email":        os.environ.get("GMAIL_EMAIL"),
+        "gmail_app_password": os.environ.get("GMAIL_APP_PASSWORD"),
+        # RECIPIENT_OVERRIDE (from workflow_dispatch input) takes priority over secret
+        "recipient_email":    (os.environ.get("RECIPIENT_OVERRIDE") or "").strip()
+                              or os.environ.get("RECIPIENT_EMAIL"),
+    }
+
+    ini_path = SCRIPT_DIR / CREDENTIALS_FILE
+    if ini_path.exists():
+        parser = configparser.ConfigParser()
+        parser.read(ini_path)
+        cfg["zendesk_subdomain"]  = cfg["zendesk_subdomain"]  or parser.get("zendesk", "subdomain",    fallback=None)
+        cfg["zendesk_email"]      = cfg["zendesk_email"]      or parser.get("zendesk", "email",        fallback=None)
+        cfg["zendesk_api_token"]  = cfg["zendesk_api_token"]  or parser.get("zendesk", "api_token",    fallback=None)
+        cfg["gmail_email"]        = cfg["gmail_email"]        or parser.get("gmail",   "email",        fallback=None)
+        cfg["gmail_app_password"] = cfg["gmail_app_password"] or parser.get("gmail",   "app_password", fallback=None)
+        cfg["recipient_email"]    = cfg["recipient_email"]    or parser.get("email",   "recipient",    fallback=None)
+
+    # For a dry run we only need Zendesk access; email creds may be absent.
+    required = ["zendesk_subdomain", "zendesk_email", "zendesk_api_token"]
+    if not DRY_RUN:
+        required += ["gmail_email", "gmail_app_password", "recipient_email"]
+
+    missing = [k for k in required if not cfg.get(k)]
+    if missing:
+        raise SystemExit(
+            f"Missing credentials: {missing}. "
+            f"Set them as env vars (GitHub Secrets) or populate {ini_path}."
+        )
+    return cfg
+
+
+# ============================================================================
+# DATE RANGE
+# ============================================================================
+def resolve_date_range():
+    """Return (start_date, end_date) as 'YYYY-MM-DD' strings.
+
+    The window is half-open: created >= start AND created < end. When both
+    START_DATE and END_DATE are provided they are used verbatim; otherwise the
+    previous full calendar month is computed (first day of last month up to,
+    but not including, the first day of the current month).
+    """
+    if START_DATE_ENV and END_DATE_ENV:
+        return START_DATE_ENV, END_DATE_ENV
+
+    today = datetime.now(timezone.utc).date()
+    first_of_this_month = today.replace(day=1)  # exclusive upper bound
+
+    if first_of_this_month.month == 1:
+        prev_year, prev_month = first_of_this_month.year - 1, 12
+    else:
+        prev_year, prev_month = first_of_this_month.year, first_of_this_month.month - 1
+    first_of_prev_month = date(prev_year, prev_month, 1)
+
+    return first_of_prev_month.isoformat(), first_of_this_month.isoformat()
+
+
+def format_date(created_at):
+    """Format a Zendesk ISO timestamp as MM/DD/YYYY."""
+    if not created_at:
+        return ""
+    try:
+        return datetime.strptime(
+            created_at, "%Y-%m-%dT%H:%M:%SZ"
+        ).strftime("%m/%d/%Y")
+    except ValueError:
+        return created_at[:10]
+
+
+# ============================================================================
+# ZENDESK API
+# ============================================================================
+def make_session(creds):
+    session = requests.Session()
+    session.auth = (f"{creds['zendesk_email']}/token", creds["zendesk_api_token"])
+    session.headers.update({"Content-Type": "application/json"})
+    return session
+
+
+def zendesk_get(session, url, params=None):
+    """GET with Zendesk rate-limit (429) handling."""
+    while True:
+        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+
+        if response.status_code == 429:
+            wait = int(response.headers.get("Retry-After", "10"))
+            print(f"  Rate limited. Waiting {wait}s...")
+            time.sleep(wait)
+            continue
+
+        if response.status_code >= 400:
+            print("  ERROR URL:", response.url)
+            print("  ERROR BODY:", response.text)
+
+        response.raise_for_status()
+        return response.json()
+
+
+def search_tickets(session, base_url, start_date, end_date):
+    query = (
+        f'type:ticket '
+        f'form:"{FORM_NAME}" '
+        f'created>={start_date} '
+        f'created<{end_date}'
+    )
+
+    print(f"  Query: {query}")
+
+    url = f"{base_url}/api/v2/search.json"
+    params = {"query": query}
+
+    while url:
+        data = zendesk_get(session, url, params=params)
+
+        for result in data.get("results", []):
+            if result.get("result_type") == "ticket":
+                yield result
+
+        url = data.get("next_page")
+        params = None
+        time.sleep(SLEEP_SECONDS)
+
+
+def get_ticket_details(session, base_url, ticket_id):
+    url = f"{base_url}/api/v2/tickets/{ticket_id}.json"
+    data = zendesk_get(session, url)
+    return data.get("ticket", {})
+
+
+def get_property_id_from_ticket(ticket):
+    for field in ticket.get("custom_fields", []):
+        if field.get("id") == PROPERTY_ID_FIELD_ID:
+            return field.get("value", "") or ""
+    return ""
+
+
+def has_side_conversation(session, base_url, ticket_id):
+    url = f"{base_url}/api/v2/tickets/{ticket_id}/side_conversations.json"
+    data = zendesk_get(session, url)
+    return "Yes" if data.get("side_conversations") else "No"
+
+
+def collect_rows(session, base_url, start_date, end_date):
+    rows = []
+    count = 0
+
+    for search_ticket in search_tickets(session, base_url, start_date, end_date):
+        ticket_id = search_ticket["id"]
+        count += 1
+
+        print(f"  Checking Ticket {ticket_id}")
+
+        full_ticket = get_ticket_details(session, base_url, ticket_id)
+        property_id = get_property_id_from_ticket(full_ticket)
+        side_convo  = has_side_conversation(session, base_url, ticket_id)
+        ticket_date = format_date(search_ticket.get("created_at", ""))
+
+        rows.append({
+            "Ticket ID":         ticket_id,
+            "Date":              ticket_date,
+            "Property ID":       property_id,
+            "Side Conversation": side_convo,
+            "Status":            search_ticket.get("status", ""),
+            "Subject":           search_ticket.get("subject", ""),
+        })
+
+        if TEST_ONE:
+            print("  TEST_ONE set — stopping after the first ticket.")
+            break
+
+        time.sleep(SLEEP_SECONDS)
+
+    return rows, count
+
+
+# ============================================================================
+# REPORT BUILDING
+# ============================================================================
+def build_excel(rows):
+    df = pd.DataFrame(rows, columns=REPORT_COLUMNS)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Vacant Home Utility")
+        ws = writer.sheets["Vacant Home Utility"]
+
+        # Auto-size columns (capped at 60 chars)
+        for col in ws.columns:
+            letter  = col[0].column_letter
+            max_len = max((len(str(c.value or "")) for c in col), default=10)
+            ws.column_dimensions[letter].width = min(max_len + 2, 60)
+
+        # Freeze header row
+        ws.freeze_panes = "A2"
+
+    buf.seek(0)
+    return buf, len(rows)
+
+
+# ============================================================================
+# EMAIL
+# ============================================================================
+def send_email(creds, attachment_buf, filename, row_count, start_date, end_date):
+    today = datetime.now(timezone.utc).strftime("%B %d, %Y")
+
+    msg            = MIMEMultipart()
+    msg["From"]    = creds["gmail_email"]
+    msg["To"]      = creds["recipient_email"]
+    msg["Subject"] = f"Vacant Home Utility Report - {start_date} to {end_date}"
+
+    if TEST_ONE:
+        msg["Subject"] += " [TEST ONE]"
+
+    body = (
+        f"Hi,\n\n"
+        f"Attached is the Vacant Home Utility Request report for tickets "
+        f"created from {start_date} (inclusive) to {end_date} (exclusive).\n\n"
+        f"Ticket count:   {row_count}\n"
+        f"Date range:     {start_date} -> {end_date}\n"
+        f"Generated:      {today} (UTC)\n"
+        f"Sent to:        {creds['recipient_email']}\n\n"
+        f"This report is generated automatically on its configured schedule.\n"
+        f"To run manually or with overrides, use the GitHub Actions "
+        f"\"Vacant Home Utility Report\" workflow -> Run workflow.\n"
+    )
+    msg.attach(MIMEText(body, "plain"))
+
+    part = MIMEBase("application", "octet-stream")
+    part.set_payload(attachment_buf.read())
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
+    msg.attach(part)
+
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=REQUEST_TIMEOUT) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(creds["gmail_email"], creds["gmail_app_password"])
+        server.sendmail(creds["gmail_email"], creds["recipient_email"], msg.as_string())
+
+    print(f"  Email sent to {creds['recipient_email']}")
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+def main():
+    print("=== Vacant Home Utility Report Exporter ===")
+    now = datetime.now(timezone.utc)
+    print(f"Run date:  {now.strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"DRY_RUN={DRY_RUN}  TEST_ONE={TEST_ONE}")
+
+    creds = load_credentials()
+    start_date, end_date = resolve_date_range()
+    print(f"Date range: {start_date} (>=) to {end_date} (<)\n")
+
+    base_url = f"https://{creds['zendesk_subdomain']}.zendesk.com"
+    session  = make_session(creds)
+
+    print("[1/3] Fetching tickets from Zendesk...")
+    rows, count = collect_rows(session, base_url, start_date, end_date)
+    print(f"  Processed {count} tickets.")
+
+    print("[2/3] Building Excel report...")
+    excel_buf, row_count = build_excel(rows)
+    filename = f"vacant_home_utility_requests_{start_date}_{end_date}.xlsx"
+    print(f"  Rows: {row_count}")
+    print(f"  File: {filename}")
+
+    if DRY_RUN:
+        out = SCRIPT_DIR / filename
+        out.write_bytes(excel_buf.getvalue())
+        print(f"[3/3] DRY_RUN — saved locally to {out}. Email NOT sent.")
+        return
+
+    print("[3/3] Sending email...")
+    send_email(creds, excel_buf, filename, row_count, start_date, end_date)
+
+    print("\nDone. Report delivered.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"\nFAILED: {e}", file=sys.stderr)
+        raise

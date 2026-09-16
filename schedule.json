@@ -1,0 +1,8 @@
+{
+  "frequency": "monthly",
+  "day_of_week": "Friday",
+  "hour": "8",
+  "dry_run": "false",
+  "start_date": "",
+  "end_date": ""
+}

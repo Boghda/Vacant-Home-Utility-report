@@ -1,0 +1,12 @@
+# Local credentials — never commit real secrets
+credentials.ini
+
+# Generated report output
+*.xlsx
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

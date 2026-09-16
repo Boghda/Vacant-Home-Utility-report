@@ -1,0 +1,177 @@
+name: Vacant Home Utility Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      # ── Schedule settings ─────────────────────────────────────────────
+      frequency:
+        description: 'Auto-run frequency'
+        default: 'monthly'
+        type: choice
+        options:
+          - manual
+          - daily
+          - weekly
+          - monthly
+      day_of_week:
+        description: 'Day of week (weekly only)'
+        default: 'Friday'
+        type: choice
+        options:
+          - Monday
+          - Tuesday
+          - Wednesday
+          - Thursday
+          - Friday
+          - Saturday
+          - Sunday
+      hour:
+        description: 'Hour to run (UTC, 0-23)'
+        default: '8'
+        type: choice
+        options:
+          - '6'
+          - '7'
+          - '8'
+          - '9'
+          - '10'
+          - '11'
+          - '12'
+          - '13'
+          - '14'
+          - '15'
+          - '16'
+      save_only:
+        description: 'Save schedule without running report now'
+        default: 'false'
+        type: boolean
+      internal:
+        description: 'Set automatically by the hourly scheduler — do not set manually'
+        default: 'false'
+        type: boolean
+      # ── Report settings ───────────────────────────────────────────────
+      dry_run:
+        description: 'Test without sending email (saves Excel locally)'
+        default: 'false'
+        type: boolean
+      test_one:
+        description: 'Only process the first matching ticket'
+        default: 'false'
+        type: boolean
+      recipient_email:
+        description: 'Override recipient email (blank = use secret)'
+        default: ''
+        type: string
+      start_date:
+        description: 'Start date YYYY-MM-DD, inclusive (blank = previous full month)'
+        default: ''
+        type: string
+      end_date:
+        description: 'End date YYYY-MM-DD, exclusive (blank = previous full month)'
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  # ── Step 1: Save schedule ─────────────────────────────────────────────
+  save-schedule:
+    name: Save Schedule
+    runs-on: ubuntu-latest
+    # Skip on scheduler-triggered (internal) runs: the settings are unchanged
+    # there, so re-writing schedule.json would only add a second, competing
+    # committer that races the scheduler's own last_triggered_date push and
+    # silently drops that dedup marker. Only run this job for manual dispatches
+    # that actually change the schedule.
+    if: inputs.frequency != 'manual' && inputs.internal != 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull latest before merging
+        run: git pull --ff-only origin main || true
+        # Closes the remaining race window: this job's checkout could
+        # happen before check_schedule.py's own commit of last_triggered_date
+        # has landed, in which case merging against this job's local copy
+        # alone would still silently drop that field. Pulling immediately
+        # before the merge — not just relying on the checkout — catches a
+        # same-day scheduler commit that landed in between.
+
+      - name: Write schedule.json
+        run: |
+          python3 -c "
+          import json, os
+
+          # Merge into the existing file rather than overwrite it --
+          # this job only owns the schedule/report inputs below.
+          # last_triggered_date belongs to check_schedule.py; blindly
+          # rebuilding the whole file from scratch here would wipe that
+          # field out and make the report re-fire every hour the same day.
+          schedule = {}
+          if os.path.exists('schedule.json'):
+              with open('schedule.json') as f:
+                  schedule = json.load(f)
+
+          schedule.update({
+            'frequency':   '${{ inputs.frequency }}',
+            'day_of_week': '${{ inputs.day_of_week }}',
+            'hour':        '${{ inputs.hour }}',
+            'dry_run':     '${{ inputs.dry_run }}',
+            'start_date':  '${{ inputs.start_date }}',
+            'end_date':    '${{ inputs.end_date }}',
+          })
+
+          with open('schedule.json', 'w') as f:
+              json.dump(schedule, f, indent=2)
+          print('Saved:', json.dumps(schedule, indent=2))
+          "
+
+      - name: Commit schedule.json
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+          git add schedule.json
+          git diff --staged --quiet || git commit -m "schedule: ${{ inputs.frequency }} at ${{ inputs.hour }}:00 UTC on ${{ inputs.day_of_week }}"
+          git push
+
+  # ── Step 2: Run report ────────────────────────────────────────────────
+  send-report:
+    name: Export & Email Vacant Home Utility Report
+    runs-on: ubuntu-latest
+    if: always() && inputs.save_only != 'true'
+    needs: [save-schedule]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run report exporter
+        env:
+          ZENDESK_SUBDOMAIN:  ${{ secrets.ZENDESK_SUBDOMAIN }}
+          ZENDESK_EMAIL:      ${{ secrets.ZENDESK_EMAIL }}
+          ZENDESK_API_TOKEN:  ${{ secrets.ZENDESK_API_TOKEN }}
+          GMAIL_EMAIL:        ${{ secrets.GMAIL_EMAIL }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL:    ${{ secrets.RECIPIENT_EMAIL }}
+          DRY_RUN:            ${{ inputs.dry_run }}
+          TEST_ONE:           ${{ inputs.test_one }}
+          RECIPIENT_OVERRIDE: ${{ inputs.recipient_email }}
+          START_DATE:         ${{ inputs.start_date }}
+          END_DATE:           ${{ inputs.end_date }}
+        run: python report_exporter.py
+
+      - name: Upload report artifact (dry run only)
+        if: inputs.dry_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vacant-home-utility-report
+          path: "*.xlsx"
+          if-no-files-found: ignore
