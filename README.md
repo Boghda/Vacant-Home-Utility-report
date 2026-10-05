@@ -104,6 +104,23 @@ and is intentionally **not** a form field — the options form only controls
 different day, change `MONTHLY_RUN_DAY` in `check_schedule.py` (keep it `28` or
 lower so every month has that day).
 
+## Triggering from an external tool (e.g. Pocket Automation)
+
+Tools that start the report by calling GitHub's workflow-dispatch API
+(`POST /repos/<owner>/<repo>/actions/workflows/<id>/dispatches`) need a GitHub
+token with the right scope, or the dispatch fails with *"check token scope."*
+This is the token in the external tool — **not** the Zendesk or Gmail secrets.
+
+- **Classic personal access token:** enable the **`repo`** scope (GitHub's
+  documented requirement for the dispatch endpoint; required for private
+  repos). The `workflow` scope is also fine to include.
+- **Fine-grained personal access token:** grant it access to this repository
+  with **Actions: Read and write** (plus the always-required **Metadata:
+  Read**).
+
+The token's account must have write access to the repo. A successful dispatch
+returns HTTP 204 and the run appears under **Actions**.
+
 ## Running locally
 
 ```bash
